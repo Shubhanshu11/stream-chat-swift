@@ -31,6 +31,8 @@ public struct LogSubsystem: OptionSet {
     public static let webSocket = Self(rawValue: 1 << 3)
     /// The subsystem responsible for offline support.
     public static let offlineSupport = Self(rawValue: 1 << 4)
+    /// The subsystem responsible for token refreshing.
+    public static let tokenRefresh = Self(rawValue: 1 << 5)
 }
 
 public enum LogConfig {

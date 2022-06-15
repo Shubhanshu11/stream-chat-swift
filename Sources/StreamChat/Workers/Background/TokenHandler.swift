@@ -59,7 +59,7 @@ final class DefaultTokenHandler: TokenHandler {
         self.connectionProvider = connectionProvider
         self.retryStrategy = retryStrategy
         self.maximumTokenRefreshAttempts = maximumTokenRefreshAttempts
-        self.retryTimerType = timerType
+        retryTimerType = timerType
     }
     
     deinit {
@@ -84,11 +84,14 @@ final class DefaultTokenHandler: TokenHandler {
     }
     
     func refreshToken(completion: @escaping TokenWaiter) {
+        log.debug("Token refresh is initiated.", subsystems: .tokenRefresh)
+        
         let shouldTriggerRefresh = initiateRefreshIfNotRunning()
         
         _ = add(tokenWaiter: completion)
         
         guard shouldTriggerRefresh else {
+            log.debug("Token refresh process is already in progress.", subsystems: .tokenRefresh)
             return
         }
         
@@ -105,11 +108,16 @@ final class DefaultTokenHandler: TokenHandler {
             // and compare it we with the current token when refresh is completed. If the tokens does not match,
             // it means the token was manually assigned and results from `tokenProvider` should be discarded.
             guard self.currentToken == tokenBeforeRefresh else {
+                let tokenAssingedWhileRefresh = """
+                The `currentToken` was assinged while the refresh process.
+                The token given by `tokenProvider` will be discarded.
+                """
+                log.info(tokenAssingedWhileRefresh, subsystems: .tokenRefresh)
                 return
             }
             
             switch $0 {
-            case .success(let newToken) where newToken == self.currentToken:
+            case let .success(newToken) where newToken == self.currentToken:
                 let sameTokenError = """
                     Token refresh failed ❌: the old token was returned during the refresh proccess.
                     When connecting with a static token, make sure it has no expiration date.
@@ -147,6 +155,7 @@ final class DefaultTokenHandler: TokenHandler {
     
     private func retry(completion: @escaping (Result<Token, Error>) -> Void) {
         guard retryStrategy.consecutiveFailuresCount < maximumTokenRefreshAttempts else {
+            log.error("❌ Token refresh failed: all retry attempts are used.", subsystems: .tokenRefresh)
             completion(.failure(ClientError.TooManyTokenRefreshAttempts()))
             return
         }
@@ -154,17 +163,27 @@ final class DefaultTokenHandler: TokenHandler {
         let delay = retryStrategy.consecutiveFailuresCount > 0
             ? retryStrategy.nextRetryDelay()
             : 0
-                        
+        
+        let attempt = retryStrategy.consecutiveFailuresCount + 1
+        
+        log.debug("⏳ Will fetch token in \(delay) sec (\(attempt) attempt)", subsystems: .tokenRefresh)
+        
         retryTimer = retryTimerType.schedule(timeInterval: delay, queue: .main) { [weak self] in
             guard let self = self else { return }
-                        
+            
+            log.debug("🔥 Fetching token... (\(attempt) attempt)", subsystems: .tokenRefresh)
+            
             self.connectionProvider.fetchToken { [weak self] in
                 guard let self = self else { return }
                 
                 switch $0 {
-                case .success(let token):
+                case let .success(token):
+                    log.debug("📥 Token is fetched from \(attempt) attempt.", subsystems: .tokenRefresh)
+                    
                     completion(.success(token))
-                case .failure:
+                case let .failure(error):
+                    log.debug("❌ Fetching token failed: \(error.localizedDescription)", subsystems: .tokenRefresh)
+                    
                     self.retryStrategy.incrementConsecutiveFailures()
                     self.retry(completion: completion)
                 }
@@ -174,9 +193,11 @@ final class DefaultTokenHandler: TokenHandler {
     
     private func handleTokenResult(_ result: Result<Token, Error>) {
         switch result {
-        case .success(let token):
+        case let .success(token):
+            log.debug("✅ Assigning the new token, completing waiters", subsystems: .tokenRefresh)
             currentToken = token
-        case .failure:
+        case let .failure(error):
+            log.debug("❌ Reseting the token, cancelling token waiters with error: \(error.localizedDescription)", subsystems: .tokenRefresh)
             currentToken = nil
         }
         
