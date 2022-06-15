@@ -63,7 +63,7 @@ final class ChatClientUpdater_Tests: XCTestCase {
         XCTAssertNil(client.connectionId)
         // Assert all requests waiting for the connection-id were canceled.
         XCTAssertTrue(client.completeConnectionIdWaiters_called)
-        XCTAssertNil(client.completeConnectionIdWaiters_connectionId)
+        XCTAssertTrue(client.completeConnectionIdWaiters_connectionIdResult?.error is ClientError.ClientHasBeenDisconnected)
     }
 
     func test_disconnect_whenWebSocketIsNotConnected() throws {
@@ -161,7 +161,7 @@ final class ChatClientUpdater_Tests: XCTestCase {
         XCTAssertEqual(client.connectionIdWaiters.count, 1)
 
         // Simulate established connection and provide `connectionId` to waiters.
-        client.completeConnectionIdWaiters(connectionId: .unique)
+        client.completeConnectionIdWaiters(result: .success(.unique))
 
         AssertAsync {
             // Wait for completion to be called.
@@ -172,7 +172,7 @@ final class ChatClientUpdater_Tests: XCTestCase {
     }
 
     func test_connect_callsWebSocketClient_andPropagatesError() throws {
-        for connectionError in [nil, ClientError.Unexpected()] {
+        for connectionError in [nil, TestError()] {
             // Create an active client with user session.
             let client = mockClientWithUserSession()
 
@@ -196,25 +196,13 @@ final class ChatClientUpdater_Tests: XCTestCase {
             // Assert new connection id waiter is added.
             XCTAssertEqual(client.connectionIdWaiters.count, 1)
 
-            if let error = connectionError {
-                // Simulate web socket `disconnected` state initiated by the server with the specific error.
-                client.mockWebSocketClient.simulateConnectionStatus(.disconnected(source: .serverInitiated(error: error)))
-            }
-
             // Simulate error while establishing a connection.
-            client.completeConnectionIdWaiters(connectionId: nil)
+            client.completeConnectionIdWaiters(result: connectionError.map { .failure($0) } ?? .success(.unique))
 
             // Wait completion is called.
             AssertAsync.willBeTrue(connectCompletionCalled)
 
-            if connectionError == nil {
-                // Assert `ClientError.ConnectionNotSuccessful` error is propagated.
-                XCTAssertTrue(connectCompletionError is ClientError.ConnectionNotSuccessful)
-            } else {
-                // Assert `ClientError.ConnectionNotSuccessful` error with underlaying error is propagated.
-                let clientError = connectCompletionError as! ClientError.ConnectionNotSuccessful
-                XCTAssertTrue(clientError.underlyingError is ClientError.Unexpected)
-            }
+            XCTAssertEqual(connectCompletionError as? TestError, connectionError)
         }
     }
 
@@ -242,7 +230,9 @@ final class ChatClientUpdater_Tests: XCTestCase {
             updater = nil
 
             // Simulate established connection.
-            client.completeConnectionIdWaiters(connectionId: connectionId)
+            client.completeConnectionIdWaiters(
+                result: connectionId.map { .success($0) } ?? .failure(TestError())
+            )
 
             // Wait for completion to be called.
             AssertAsync.willBeTrue(connectCompletionCalled)
@@ -254,6 +244,8 @@ final class ChatClientUpdater_Tests: XCTestCase {
             }
         }
     }
+    
+    // MARK: - reloadUserIfNeeded
     
     func test_reloadUserIfNeeded_sameUser() throws {
         // Create current user id.
@@ -299,7 +291,7 @@ final class ChatClientUpdater_Tests: XCTestCase {
         // Assert current user id is valid.
         XCTAssertEqual(client.currentUserId, updatedToken.userId)
         // Assert token is valid.
-        XCTAssertEqual(client.currentToken, updatedToken)
+        XCTAssertEqual(client.mockTokenHandler.mock_setToken.calls.first?.0, updatedToken)
         // Assert web-socket is not disconnected
         XCTAssertEqual(client.mockWebSocketClient.disconnect_calledCounter, 0)
         // Assert web-socket endpoint is valid.
@@ -308,9 +300,9 @@ final class ChatClientUpdater_Tests: XCTestCase {
             AnyEndpoint(.webSocketConnect(userInfo: UserInfo(id: updatedToken.userId)))
         )
         // Assert `completeTokenWaiters` was called.
-        XCTAssertTrue(client.completeTokenWaiters_called)
+        XCTAssertTrue(client.mockTokenHandler.mock_setToken.called)
         // Assert `completeTokenWaiters` was called with updated token.
-        XCTAssertEqual(client.completeTokenWaiters_token, updatedToken)
+        XCTAssertEqual(client.mockTokenHandler.mock_setToken.calls.first?.0, updatedToken)
         // Assert background workers stay the same.
         XCTAssertEqual(client.testBackgroundWorkerId, oldWorkerIDs)
         // Assert database is not flushed.
@@ -383,14 +375,14 @@ final class ChatClientUpdater_Tests: XCTestCase {
         }
         
         // Assert `completeTokenWaiters` was called.
-        XCTAssertTrue(client.completeTokenWaiters_called)
+        XCTAssertTrue(client.mockTokenHandler.mock_setToken.called)
         // Assert `completeTokenWaiters` was called with `nil` token which means all
         // pending requests were cancelled.
-        XCTAssertNil(client.completeTokenWaiters_token)
+        XCTAssertTrue(client.mockTokenHandler.mock_cancelTokenWaiters.called)
         // Assert current user id is valid.
         XCTAssertEqual(client.currentUserId, updatedToken.userId)
         // Assert token is valid.
-        XCTAssertEqual(client.currentToken, updatedToken)
+        XCTAssertEqual(client.mockTokenHandler.mock_setToken.calls.first?.0, updatedToken)
         
         // Assert web-socket is disconnected
         XCTAssertEqual(client.mockWebSocketClient.disconnect_calledCounter, 1)
@@ -448,7 +440,7 @@ final class ChatClientUpdater_Tests: XCTestCase {
         // Simulate `reloadUserIfNeeded` call and catch the result.
         let token: Token = .unique()
         let error = try waitFor { completion in
-            return updater.reloadUserIfNeeded(
+            updater.reloadUserIfNeeded(
                 userInfo: .init(id: token.userId),
                 userConnectionProvider: .static(token),
                 completion: completion
@@ -534,12 +526,13 @@ final class ChatClientUpdater_Tests: XCTestCase {
         }
 
         // Simulate error while establishing a connection.
-        client.completeConnectionIdWaiters(connectionId: nil)
+        let error = TestError()
+        client.completeConnectionIdWaiters(result: .failure(error))
 
         // Wait completion is called.
         AssertAsync.willBeTrue(reloadUserIfNeededCompletionCalled)
         // Assert `ClientError.ConnectionNotSuccessfull` is propagated.
-        XCTAssertTrue(reloadUserIfNeededCompletionError is ClientError.ConnectionNotSuccessful)
+        XCTAssertEqual(reloadUserIfNeededCompletionError as? TestError, error)
     }
 
     func test_reloadUserIfNeeded_keepsUpdaterAlive() {
@@ -598,18 +591,21 @@ final class ChatClientUpdater_Tests: XCTestCase {
         // Simulate `reloadUserIfNeeded` call.
         var reloadUserIfNeededCompletionCalled = false
         var reloadUserIfNeededCompletionError: Error?
+        let userConnectionProvider = UserConnectionProvider.static(token)
         updater.reloadUserIfNeeded(
             userInfo: .init(id: userId),
-            userConnectionProvider: .static(token)
+            userConnectionProvider: userConnectionProvider
         ) {
             reloadUserIfNeededCompletionCalled = true
             reloadUserIfNeededCompletionError = $0
         }
 
+        // Assert connection provider is not assigned immidiately
+        XCTAssertNotEqual(client.mockTokenHandler.connectionProvider, userConnectionProvider)
         // Assert user id is assigned.
         XCTAssertEqual(client.currentUserId, userId)
         // Assert token is assigned.
-        XCTAssertEqual(client.currentToken, token)
+        XCTAssertEqual(client.mockTokenHandler.mock_setToken.calls.first?.0, token)
         // Assert web-socket disconnect is not called
         XCTAssertEqual(
             client.mockWebSocketClient.disconnect_calledCounter,
@@ -621,7 +617,7 @@ final class ChatClientUpdater_Tests: XCTestCase {
             AnyEndpoint(.webSocketConnect(userInfo: UserInfo(id: userId)))
         )
         // Assert `completeTokenWaiters` is called with the token.
-        XCTAssertEqual(client.completeTokenWaiters_token, token)
+        XCTAssertEqual(client.mockTokenHandler.mock_setToken.calls.first?.0, token)
         // Assert background workers are instantiated
         XCTAssertNotNil(client.testBackgroundWorkerId)
         // Assert store recreation was not triggered since there's no data from prev. user
@@ -644,14 +640,261 @@ final class ChatClientUpdater_Tests: XCTestCase {
             Assert.willBeEqual(client.connectionId, connectionId)
             // Assert connection status is updated.
             Assert.willBeEqual(client.connectionStatus, .connected)
+            // Assert connection provider is updated.
+            Assert.willBeEqual(client.mockTokenHandler.connectionProvider, userConnectionProvider)
         }
+    }
+    
+    func test_reloadUserIfNeeded_whenFirstConnectFailsWithExpiredTokenError_callsCompletionAndDoesNotTriggerRefeshProcess() throws {
+        // GIVEN
+        let token = Token.unique()
+        let mockClient = ChatClient_Mock(config: .init(apiKeyString: .unique))
+        let sut = ChatClientUpdater(client: mockClient)
+        
+        var reloadUserError: Error?
+        let reloadUserCompletionCalled = expectation(description: "reloadUserIfNeeded completion called")
+        sut.reloadUserIfNeeded(
+            userInfo: .init(id: token.userId),
+            userConnectionProvider: .initiated(userId: token.userId) { $0(.success(token)) }
+        ) { error in
+            reloadUserError = error
+            reloadUserCompletionCalled.fulfill()
+        }
+        
+        XCTAssertTrue(mockClient.mockWebSocketClient.connect_called)
+        
+        // WHEN
+        let tokenExpiredError = ClientError(with: ErrorPayload(code: 40, message: "", statusCode: 200))
+        mockClient.mockWebSocketClient.simulateConnectionStatus(.disconnected(source: .serverInitiated(error: tokenExpiredError)))
+        
+        // THEN
+        wait(for: [reloadUserCompletionCalled], timeout: defaultTimeout)
+        
+        XCTAssertFalse(mockClient.mockTokenHandler.mock_refreshToken.called)
+        
+        let connectionError = try XCTUnwrap(reloadUserError as? ClientError)
+        let errorPayload = try XCTUnwrap(connectionError.underlyingError as? ErrorPayload)
+        XCTAssertTrue(errorPayload.isInvalidTokenError)
+    }
+    
+    // MARK: handleExpiredTokenError
+    
+    func test_handleExpiredTokenError_whenErrorComesFromAPIClientAndWebSocketIsConnected_happyPath() throws {
+        // GIVEN
+        let token = Token.unique()
+        let mockClient = mockClientWithUserSession(isActive: true, token: token)
+        
+        let sut = ChatClientUpdater(client: mockClient)
+        
+        // WHEN
+        var handleExpiredTokenError: Error?
+        let handleExpiredTokenCompletionCalled = expectation(description: "handleExpiredTokenError completion called")
+        let tokenExpiredError = ClientError("token expired")
+        sut.handleExpiredTokenError(tokenExpiredError) { error in
+            handleExpiredTokenError = error
+            handleExpiredTokenCompletionCalled.fulfill()
+        }
+        
+        // THEN
+        wait(for: [mockClient.mockWebSocketClient.disconnect_expectation], timeout: defaultTimeout)
+        let source: WebSocketConnectionState.DisconnectionSource = .serverInitiated(error: tokenExpiredError)
+        XCTAssertEqual(mockClient.mockWebSocketClient.disconnect_source, source)
+        mockClient.mockWebSocketClient.simulateConnectionStatus(.disconnected(source: source))
+        mockClient.mockWebSocketClient.disconnect_completion?()
+        
+        // AND
+        let refreshedToken = Token.unique(userId: token.userId)
+        XCTAssertEqual(mockClient.mockTokenHandler.mock_refreshToken.calls.count, 1)
+        mockClient.mockTokenHandler.mock_refreshToken.calls.first?(.success(refreshedToken))
+        
+        // AND
+        wait(for: [mockClient.mockWebSocketClient.connect_expectation], timeout: defaultTimeout)
+        mockClient.mockWebSocketClient.simulateConnectionStatus(.connected(connectionId: .unique))
+        wait(for: [handleExpiredTokenCompletionCalled], timeout: defaultTimeout)
+        XCTAssertNil(handleExpiredTokenError)
+    }
+    
+    func test_handleExpiredTokenError_whenErrorComesFromAPIClientAndWebSocketIsDisconnected_happyPath() {
+        // GIVEN
+        let token = Token.unique()
+        let mockClient = mockClientWithUserSession(isActive: true, token: token)
+        let sut = ChatClientUpdater(client: mockClient)
+        
+        // WHEN
+        mockClient.mockWebSocketClient.simulateConnectionStatus(.disconnected(source: .userInitiated))
+        
+        var handleExpiredTokenError: Error?
+        let handleExpiredTokenCompletionCalled = expectation(description: "handleExpiredTokenError completion called")
+        let tokenExpiredError = ClientError("token expired")
+        sut.handleExpiredTokenError(tokenExpiredError) { error in
+            handleExpiredTokenError = error
+            handleExpiredTokenCompletionCalled.fulfill()
+        }
+        
+        XCTAssertFalse(mockClient.mockWebSocketClient.disconnect_called)
+        
+        // THEN
+        let refreshedToken = Token.unique(userId: token.userId)
+        XCTAssertEqual(mockClient.mockTokenHandler.mock_refreshToken.calls.count, 1)
+        mockClient.mockTokenHandler.mock_refreshToken.calls.first?(.success(refreshedToken))
+        
+        // AND
+        XCTAssertFalse(mockClient.mockWebSocketClient.connect_called)
+        
+        // AND
+        wait(for: [handleExpiredTokenCompletionCalled], timeout: defaultTimeout)
+        XCTAssertNil(handleExpiredTokenError)
+    }
+    
+    func test_handleExpiredTokenError_whenErrorComesFromWebSocket_happyPath() {
+        // GIVEN
+        let token = Token.unique()
+        let mockClient = mockClientWithUserSession(isActive: true, token: token)
+        let sut = ChatClientUpdater(client: mockClient)
+        
+        // WHEN
+        let tokenExpiredError = ClientError("token expired")
+        mockClient.mockWebSocketClient.simulateConnectionStatus(.disconnected(source: .serverInitiated(error: tokenExpiredError)))
+        
+        var handleExpiredTokenError: Error?
+        let handleExpiredTokenCompletionCalled = expectation(description: "handleExpiredTokenError completion called")
+        sut.handleExpiredTokenError(tokenExpiredError) { error in
+            handleExpiredTokenError = error
+            handleExpiredTokenCompletionCalled.fulfill()
+        }
+        
+        XCTAssertFalse(mockClient.mockWebSocketClient.disconnect_called)
+        
+        // THEN
+        let refreshedToken = Token.unique(userId: token.userId)
+        XCTAssertEqual(mockClient.mockTokenHandler.mock_refreshToken.calls.count, 1)
+        mockClient.mockTokenHandler.mock_refreshToken.calls.first?(.success(refreshedToken))
+        
+        // AND
+        wait(for: [mockClient.mockWebSocketClient.connect_expectation], timeout: defaultTimeout)
+        mockClient.mockWebSocketClient.simulateConnectionStatus(.connected(connectionId: .unique))
+        
+        // AND
+        wait(for: [handleExpiredTokenCompletionCalled], timeout: defaultTimeout)
+        XCTAssertNil(handleExpiredTokenError)
+    }
+    
+    func test_handleExpiredTokenError_whenClientDeallocatesBeforeTokenIsRefreshed_throwsError() throws {
+        // GIVEN
+        let token = Token.unique()
+        var mockClient: ChatClient_Mock? = mockClientWithUserSession(isActive: true, token: token)
+        let sut = ChatClientUpdater(client: try XCTUnwrap(mockClient))
+        
+        var handleExpiredTokenError: Error?
+        let handleExpiredTokenCompletionCalled = expectation(description: "handleExpiredTokenError completion called")
+        sut.handleExpiredTokenError(ClientError("token expired")) { error in
+            handleExpiredTokenError = error
+            handleExpiredTokenCompletionCalled.fulfill()
+        }
+        
+        // WHEN
+        wait(for: [mockClient?.mockWebSocketClient.disconnect_expectation].compactMap { $0 }, timeout: defaultTimeout)
+        let disconnect_completion = mockClient?.mockWebSocketClient.disconnect_completion
+        mockClient = nil
+        disconnect_completion?()
+        
+        // THEN
+        wait(for: [handleExpiredTokenCompletionCalled], timeout: defaultTimeout)
+        XCTAssertTrue(handleExpiredTokenError is ClientError.ClientHasBeenDeallocated)
+    }
+    
+    func test_handleExpiredTokenError_whenClientDeallocatesBeforeWebSocketIsReconnected_throwsError() throws {
+        // GIVEN
+        let token = Token.unique()
+        var mockClient: ChatClient_Mock? = mockClientWithUserSession(isActive: true, token: token)
+        let sut = ChatClientUpdater(client: try XCTUnwrap(mockClient))
+        
+        let tokenExpiredError = ClientError("token expired")
+        var handleExpiredTokenError: Error?
+        let handleExpiredTokenCompletionCalled = expectation(description: "handleExpiredTokenError completion called")
+        sut.handleExpiredTokenError(tokenExpiredError) { error in
+            handleExpiredTokenError = error
+            handleExpiredTokenCompletionCalled.fulfill()
+        }
+        
+        wait(for: [mockClient?.mockWebSocketClient.disconnect_expectation].compactMap { $0 }, timeout: defaultTimeout)
+        mockClient?.mockWebSocketClient.simulateConnectionStatus(.disconnected(source: .serverInitiated(error: tokenExpiredError)))
+        mockClient?.mockWebSocketClient.disconnect_completion?()
+        
+        // WHEN
+        let refreshTokenCompletion = mockClient?.mockTokenHandler.mock_refreshToken.calls.first
+        mockClient = nil
+        refreshTokenCompletion?(.success(.unique(userId: token.userId)))
+        
+        // THEN
+        wait(for: [handleExpiredTokenCompletionCalled], timeout: defaultTimeout)
+        XCTAssertTrue(handleExpiredTokenError is ClientError.ClientHasBeenDeallocated)
+    }
+    
+    func test_handleExpiredTokenError_whenTokenRefreshFails_propagatesError() throws {
+        // GIVEN
+        let token = Token.unique()
+        let mockClient = mockClientWithUserSession(isActive: true, token: token)
+        let sut = ChatClientUpdater(client: try XCTUnwrap(mockClient))
+        
+        var handleExpiredTokenError: Error?
+        let handleExpiredTokenCompletionCalled = expectation(description: "handleExpiredTokenError completion called")
+        sut.handleExpiredTokenError(ClientError("token expired")) { error in
+            handleExpiredTokenError = error
+            handleExpiredTokenCompletionCalled.fulfill()
+        }
+        
+        wait(for: [mockClient.mockWebSocketClient.disconnect_expectation], timeout: defaultTimeout)
+        mockClient.mockWebSocketClient.disconnect_completion?()
+        
+        // WHEN
+        let error = TestError()
+        mockClient.mockTokenHandler.mock_refreshToken.calls.first?(.failure(error))
+        
+        // THEN
+        wait(for: [handleExpiredTokenCompletionCalled], timeout: defaultTimeout)
+        XCTAssertEqual(handleExpiredTokenError as? TestError, error)
+    }
+    
+    func test_handleExpiredTokenError_whenReconnectionFails_propagatesError() throws {
+        // GIVEN
+        let token = Token.unique()
+        let mockClient = mockClientWithUserSession(isActive: true, token: token)
+        let sut = ChatClientUpdater(client: try XCTUnwrap(mockClient))
+        
+        // WHEN
+        let tokenExpiredError = ClientError("token expired")
+        var handleExpiredTokenError: Error?
+        let handleExpiredTokenCompletionCalled = expectation(description: "handleExpiredTokenError completion called")
+        sut.handleExpiredTokenError(tokenExpiredError) { error in
+            handleExpiredTokenError = error
+            handleExpiredTokenCompletionCalled.fulfill()
+        }
+        
+        // AND
+        wait(for: [mockClient.mockWebSocketClient.disconnect_expectation], timeout: defaultTimeout)
+        mockClient.mockWebSocketClient.simulateConnectionStatus(.disconnected(source: .serverInitiated(error: tokenExpiredError)))
+        mockClient.mockWebSocketClient.disconnect_completion?()
+        
+        // AND
+        mockClient.mockTokenHandler.mock_refreshToken.calls.first?(.success(.unique(userId: token.userId)))
+        wait(for: [mockClient.mockWebSocketClient.connect_expectation], timeout: defaultTimeout)
+        
+        // AND
+        let error = TestError()
+        mockClient.completeConnectionIdWaiters(result: .failure(error))
+        
+        // THEN
+        wait(for: [handleExpiredTokenCompletionCalled], timeout: defaultTimeout)
+        XCTAssertEqual(handleExpiredTokenError as? TestError, error)
     }
 
     // MARK: - Private
 
     private func mockClientWithUserSession(
         isActive: Bool = true,
-        token: Token = .unique(userId: .unique)
+        token: Token = .unique(userId: .unique),
+        tokenProvider: TokenProvider? = nil
     ) -> ChatClient_Mock {
         // Create a config.
         var config = ChatClientConfig(apiKeyString: .unique)
@@ -659,18 +902,20 @@ final class ChatClientUpdater_Tests: XCTestCase {
 
         // Create a client.
         let client = ChatClient_Mock(config: config)
-        client.connectUser(userInfo: .init(id: token.userId), token: token)
-
         client.currentUserId = token.userId
-        client.currentToken = token
-
-        client.connectionId = .unique
-        client.connectionStatus = .connected
-        client.webSocketClient?.connectEndpoint = .webSocketConnect(
-            userInfo: UserInfo(id: token.userId)
+        client.mockTokenHandler.currentToken = token
+        client.mockTokenHandler.connectionProvider = .initiated(
+            userId: token.userId,
+            tokenProvider: tokenProvider ?? { $0(.success(token)) }
         )
-
         client.createBackgroundWorkers()
+        
+        if isActive {
+            client.webSocketClient?.connectEndpoint = .webSocketConnect(
+                userInfo: UserInfo(id: token.userId)
+            )
+            client.mockWebSocketClient.simulateConnectionStatus(.connected(connectionId: .unique))
+        }
 
         return client
     }

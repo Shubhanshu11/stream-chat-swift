@@ -142,7 +142,7 @@ public extension CurrentChatUserController {
         
         chatClientUpdater.reloadUserIfNeeded(
             userInfo: .init(id: currentUserId),
-            userConnectionProvider: client.userConnectionProvider
+            userConnectionProvider: client.tokenHandler.connectionProvider
         ) { error in
             self.callback {
                 completion?(error)

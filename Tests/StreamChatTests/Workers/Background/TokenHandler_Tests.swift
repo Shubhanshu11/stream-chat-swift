@@ -77,7 +77,7 @@ final class TokenHandler_Tests: XCTestCase {
         
         // THEN
         XCTAssertTrue(refreshResult?.error is ClientError.InvalidToken)
-        XCTAssertEqual(sut.currentToken, token)
+        XCTAssertNil(sut.currentToken)
     }
     
     func test_refreshToken_whenRefreshSucceeds() {
